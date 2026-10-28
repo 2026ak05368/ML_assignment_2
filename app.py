@@ -1,6 +1,6 @@
 """
 Streamlit app — Assignment 2 (ML Model Comparison)
-Loads pre-trained model pipelines and scores an uploaded test CSV.
+Loads pre-trained (GridSearchCV-tuned) model pipelines and scores an uploaded test CSV.
 No retraining happens here.
 """
 import streamlit as st
@@ -35,6 +35,14 @@ def load_model(path):
     return joblib.load(path)
 
 
+@st.cache_data
+def load_best_params(path="model/best_hyperparameters.csv"):
+    try:
+        return pd.read_csv(path, index_col=0)["Best hyperparameters"].to_dict()
+    except Exception:
+        return {}
+
+
 def compute_metrics(y_true, y_pred, y_proba):
     return {
         "Accuracy": accuracy_score(y_true, y_pred),
@@ -48,7 +56,7 @@ def compute_metrics(y_true, y_pred, y_proba):
 
 st.title("Income Classification — Model Comparison")
 st.caption(
-    "UCI Adult (Census Income) dataset · 5 classifiers trained offline · "
+    "UCI Adult (Census Income) dataset · 5 classifiers tuned with 5-fold CV and trained offline · "
     "upload a test CSV below to see how each model performs."
 )
 
@@ -62,8 +70,21 @@ uploaded_file = st.sidebar.file_uploader(
     help="Must contain the 12 feature columns plus the 'income' target column (0/1)."
 )
 
+try:
+    with open("test_data.csv", "rb") as f:
+        st.sidebar.download_button("Download sample test_data.csv", f, file_name="test_data.csv",
+                                   mime="text/csv", help="Held-out 1,200-row test split from training.")
+except FileNotFoundError:
+    pass
+
 selected_model_name = st.sidebar.selectbox("Select model", list(MODEL_FILES.keys()))
 
+st.sidebar.markdown("---")
+st.sidebar.info(
+    "**Note on class imbalance:** the dataset was **not resampled** (no SMOTE). "
+    "It keeps the real ~75/25 ratio. Imbalance is handled with `class_weight='balanced'` "
+    "during training, chosen per model by 5-fold CV."
+)
 st.sidebar.markdown("---")
 st.sidebar.markdown(
     "**Expected columns:**\n\n" + ", ".join(FEATURE_COLS) + f", **{TARGET_COL}**"
@@ -88,17 +109,25 @@ if missing_cols:
     st.error(f"Uploaded CSV is missing required column(s): {', '.join(missing_cols)}")
     st.stop()
 
+if not set(data[TARGET_COL].dropna().unique()) <= {0, 1}:
+    st.error(f"'{TARGET_COL}' must be binary 0/1 (1 = >50K). Found: {sorted(data[TARGET_COL].unique())[:5]}")
+    st.stop()
+
 X = data[FEATURE_COLS]
 y_true = data[TARGET_COL]
 
 st.subheader("Uploaded Data Preview")
-st.dataframe(data.head(10), use_container_width=True)
+st.dataframe(data.head(10), width="stretch")
 st.caption(f"{data.shape[0]} rows loaded.")
 
 # ---------------------------------------------------------------------------
 # Selected-model evaluation
 # ---------------------------------------------------------------------------
 st.header(f"Results — {selected_model_name}")
+
+best_params = load_best_params()
+if selected_model_name in best_params:
+    st.caption(f"Tuned hyperparameters: `{best_params[selected_model_name]}`")
 
 model = load_model(MODEL_FILES[selected_model_name])
 y_pred = model.predict(X)
@@ -125,7 +154,7 @@ with col_report:
     st.subheader("Classification Report")
     report = classification_report(y_true, y_pred, target_names=["≤50K", ">50K"], output_dict=True)
     report_df = pd.DataFrame(report).T.round(3)
-    st.dataframe(report_df, use_container_width=True)
+    st.dataframe(report_df, width="stretch")
 
 # ---------------------------------------------------------------------------
 # All-models comparison on the same uploaded data
@@ -142,7 +171,15 @@ for name, path in MODEL_FILES.items():
 comparison_df = pd.DataFrame(all_results).T.round(4)
 st.dataframe(
     comparison_df.style.highlight_max(axis=0, color="#2a9d8f44"),
-    use_container_width=True,
+    width="stretch",
+)
+
+ranking = comparison_df.sort_values(["F1", "MCC"], ascending=False)
+winner = ranking.index[0]
+st.success(
+    f"**Winner on this data: {winner}** (F1 {ranking.loc[winner, 'F1']:.4f}, "
+    f"MCC {ranking.loc[winner, 'MCC']:.4f}). Ranked by F1, then MCC — fair metrics for the "
+    "imbalanced target. Ranking: " + " › ".join(ranking.index)
 )
 
 fig2, ax2 = plt.subplots(figsize=(11, 4.5))
